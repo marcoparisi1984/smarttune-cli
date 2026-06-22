@@ -111,6 +111,16 @@ class PlatformAdapter(ABC):
         PX4:        "MC_ROLLRATE_P"  → "pid.roll.p"
         """
 
+    @abstractmethod
+    def supports_param(self, generic_name: str) -> bool:
+        """是否存在该通用参数到本平台的真实映射。
+
+        ``map_param_to_platform`` 在找不到映射时会原样返回 generic_name
+        作为兜底（便于调试），但这不代表该名字是平台上的有效参数。
+        渲染/推荐输出必须先用本方法判断，避免把无法翻译的通用名
+        （例如 ArduPilot 专属的 INS_HNTCH_REF/HMC 概念）当成真实参数展示出来。
+        """
+
     # ── 能力声明 ────────────────────────────────────────────
 
     @abstractmethod

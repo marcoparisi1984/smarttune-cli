@@ -336,6 +336,34 @@ class BetaflightAdapter(PlatformAdapter):
             except (ValueError, TypeError):
                 pass
 
+        # 部分固件把每轴 P/I/D 打包成单个逗号字符串（如 "rollPID:64,115,37"），
+        # 而不是拆成独立的 p_roll/i_roll/d_roll 字段；上面的 float(value) 对
+        # 这种值会抛 ValueError 并被静默丢弃，导致 _get_current_pid 读到的
+        # 当前增益恒为 0，PID 建议跟着失真（current=0 时 suggested 也是 0）。
+        # 这里显式拆包并写回 _PARAM_MAP_TO_PLATFORM 期望的平台原生键名；
+        # 用 setdefault 让已存在的现代分体字段（如真的有 p_roll）优先。
+        for _hkey, _axis_name in (("rollPID", "roll"), ("pitchPID", "pitch"), ("yawPID", "yaw")):
+            _raw = header.properties.get(_hkey, "")
+            _parts = _raw.split(',')
+            if len(_parts) >= 3:
+                try:
+                    _p, _i, _d = float(_parts[0]), float(_parts[1]), float(_parts[2])
+                except ValueError:
+                    continue
+                params.setdefault(f"p_{_axis_name}", _p)
+                params.setdefault(f"i_{_axis_name}", _i)
+                params.setdefault(f"d_{_axis_name}", _d)
+
+        _dmax_parts = header.properties.get("d_max", "").split(',')
+        if len(_dmax_parts) >= 3:
+            try:
+                _dmr, _dmp, _dmy = float(_dmax_parts[0]), float(_dmax_parts[1]), float(_dmax_parts[2])
+                params.setdefault("d_max_roll", _dmr)
+                params.setdefault("d_max_pitch", _dmp)
+                params.setdefault("d_max_yaw", _dmy)
+            except ValueError:
+                pass
+
         # A2 契约：注入 generic key（pid.roll.p 等）供平台无关分析器读取当前值。
         # 兼顾 BF 4.5+ 新名（p_roll）与旧固件名（pid_roll_p）。旧实现只存原生名，
         # 导致 PIDReviewer._get_current_pid 恒返回 0.0，叠加 C4 后 PID 建议被全丢弃。
@@ -538,6 +566,9 @@ class BetaflightAdapter(PlatformAdapter):
 
     def map_param_to_generic(self, platform_name: str) -> str:
         return _PARAM_MAP_TO_GENERIC.get(platform_name, platform_name)
+
+    def supports_param(self, generic_name: str) -> bool:
+        return generic_name in _PARAM_MAP_TO_PLATFORM or generic_name in _PARAM_MAP_TO_PLATFORM_LEGACY
 
     # ── 能力 ────────────────────────────────────────────────
 

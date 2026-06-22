@@ -271,15 +271,24 @@ class FullAnalysisResult:
 
     @property
     def all_recommendations(self) -> List[ParamRecommendation]:
-        """收集所有模块的参数建议。"""
+        """收集所有模块的参数建议。
+
+        某些分析器（如 FFTAnalyzer）出于性能/兼容原因返回原始 dict
+        而非 FFTAnalysisResult/FilterAnalysisResult/MagFitResult 数据类。
+        这些 dict 的 "recommendations" 是扁平的 {generic_param: value}，
+        缺少 current/reason/confidence 等字段，无法构造出真正的
+        ParamRecommendation —— 因此这里只在模块结果确实是预期的数据类时
+        才收集，避免 AttributeError（dict 没有 .recommendations 属性）。
+        dict 形式的建议仍可通过各模块自己的渲染逻辑（如 format_fft）展示。
+        """
         recs: List[ParamRecommendation] = []
         if self.pid:
             for ax_result in self.pid.axes.values():
                 recs.extend(ax_result.recommendations)
-        if self.fft:
+        if isinstance(self.fft, FFTAnalysisResult):
             recs.extend(self.fft.recommendations)
-        if self.filter:
+        if isinstance(self.filter, FilterAnalysisResult):
             recs.extend(self.filter.recommendations)
-        if self.magfit:
+        if isinstance(self.magfit, MagFitResult):
             recs.extend(self.magfit.recommendations)
         return recs

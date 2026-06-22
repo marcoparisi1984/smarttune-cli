@@ -662,6 +662,9 @@ class ArduPilotAdapter(PlatformAdapter):
     def map_param_to_generic(self, platform_name: str) -> str:
         return _PARAM_MAP_TO_GENERIC.get(platform_name, platform_name)
 
+    def supports_param(self, generic_name: str) -> bool:
+        return generic_name in _PARAM_MAP_TO_PLATFORM
+
     def capabilities(self) -> Set[str]:
         return {"pid", "fft", "filter", "sysid", "magfit", "hardware", "quality"}
 

@@ -199,8 +199,46 @@ def analyze(log_file: Path, platform_name: str, output_file: Optional[Path],
                 module_failures.append(("Magnetometer", exc))
                 progress.update(p_mag, completed=True, description=f"[yellow]! Magnetometer skipped: {exc}")
 
+        # Phase 5: Filter (B1 fix: `analyze` previously never ran filter
+        # analysis despite its own docstring/skill docs promising it).
+        # Reuses the already-parsed flight_data via the shared
+        # compute_auto_filter_response() helper instead of going through
+        # services.analyze_filter(), which would re-parse the log from disk
+        # a second time.
+        filter_result = None
+        if "filter" in capabilities:
+            p_filter = progress.add_task("[cyan]Filter analysis...", total=None)
+            try:
+                from smarttune.services.analysis import compute_auto_filter_response
+
+                auto = compute_auto_filter_response(adapter, flight_data)
+                filter_result = {
+                    "mode": "auto",
+                    "config_summary": auto["config_summary"],
+                    "cutoff_3db_hz": (
+                        round(auto["cutoff_3db_hz"], 1)
+                        if auto["cutoff_3db_hz"] is not None else None
+                    ),
+                    "key_frequency_response": auto["key_frequency_response"],
+                    "filter_chain": auto["filter_chain"],
+                    "sample_rate_hz": round(auto["sample_rate_hz"], 1),
+                }
+                if visual:
+                    filter_result["bode_data"] = {
+                        "freqs": auto["freqs"].tolist(),
+                        "magnitude_db": auto["magnitude_db"].tolist(),
+                        "phase_deg": auto["phase_deg"].tolist(),
+                    }
+                # filter_result is a plain dict (key frequency points / config
+                # summary), not a FilterAnalysisResult dataclass — kept out of
+                # full_result.filter on purpose, see all_recommendations' docstring.
+                progress.update(p_filter, completed=True, description="[green]✓ Filter analysis complete")
+            except Exception as exc:
+                module_failures.append(("Filter", exc))
+                progress.update(p_filter, completed=True, description=f"[yellow]! Filter skipped: {exc}")
+
         # Check: at least one module must succeed
-        if pid_result is None and fft_result is None and magfit_result is None:
+        if pid_result is None and fft_result is None and magfit_result is None and filter_result is None:
             progress.stop()
             for mod_name, exc in module_failures:
                 _console.print(f"\n[bold red]✗ {mod_name} failed:[/bold red]")
@@ -248,12 +286,14 @@ def analyze(log_file: Path, platform_name: str, output_file: Optional[Path],
                 fmt.format_pid(pid_result)
             if fft_result is not None:
                 fmt.format_fft(fft_result)
+            if filter_result is not None:
+                fmt.format_filter(filter_result, visual=visual)
             if magfit_result is not None:
                 fmt.format_magfit(magfit_result)
 
             # ── Markdown report ──
             if effective_report_format == "md" and output_file:
-                md = fmt.to_markdown(full_result)
+                md = fmt.to_markdown(full_result, fft_result=fft_result, filter_result=filter_result)
                 output_file.write_text(md, encoding="utf-8")
                 _console.print(f"\n[green]✓[/green] Report saved: [cyan]{output_file}[/cyan]")
 
@@ -282,6 +322,8 @@ def analyze(log_file: Path, platform_name: str, output_file: Optional[Path],
             succeeded.append("PID")
         if fft_result is not None:
             succeeded.append("FFT")
+        if filter_result is not None:
+            succeeded.append("Filter")
         if magfit_result is not None:
             succeeded.append("Magnetometer")
         failed = [name for name, _ in module_failures]

@@ -68,26 +68,29 @@ def generate_hardware_report(
     pid_hz = round(loop_hz / pid_denom) if pid_denom > 0 and loop_hz > 0 else 0
 
     # ── PID 参数 ──────────────────────────────────────────────
+    # 优先读 A2 契约的 generic key（platform/betaflight/__init__.py 在 parse()
+    # 时已经把 p_roll / pid_roll_p / 逗号打包的 rollPID 等各种固件年代的命名
+    # 统一注入为 pid.{axis}.{p,i,d,ff}），legacy 原生键名作为兜底。
     pid_params: Dict[str, Dict] = {}
     for axis in ["roll", "pitch", "yaw"]:
         pid_params[axis] = {
-            "P":  params.get(f"pid_{axis}_p", 0.0),
-            "I":  params.get(f"pid_{axis}_i", 0.0),
-            "D":  params.get(f"pid_{axis}_d", 0.0),
-            "FF": params.get(f"pid_{axis}_f", params.get(f"pid_{axis}_FF", 0.0)),
+            "P":  params.get(f"pid.{axis}.p",  params.get(f"pid_{axis}_p", 0.0)),
+            "I":  params.get(f"pid.{axis}.i",  params.get(f"pid_{axis}_i", 0.0)),
+            "D":  params.get(f"pid.{axis}.d",  params.get(f"pid_{axis}_d", 0.0)),
+            "FF": params.get(f"pid.{axis}.ff", params.get(f"pid_{axis}_f", params.get(f"pid_{axis}_FF", 0.0))),
         }
 
     # ── 滤波器参数 ────────────────────────────────────────────
     filter_config = {
-        "gyro_lowpass_hz":   params.get("gyro_lowpass_hz",   0.0),
-        "gyro_lowpass2_hz":  params.get("gyro_lowpass2_hz",  0.0),
-        "dterm_lowpass_hz":  params.get("dterm_lowpass_hz",  0.0),
-        "dterm_lowpass2_hz": params.get("dterm_lowpass2_hz", 0.0),
-        "gyro_notch1_hz":    params.get("gyro_notch1_hz",    0.0),
-        "gyro_notch1_cutoff":params.get("gyro_notch1_cutoff",0.0),
-        "gyro_notch2_hz":    params.get("gyro_notch2_hz",    0.0),
-        "gyro_notch2_cutoff":params.get("gyro_notch2_cutoff",0.0),
-        "rpm_filter_min_hz": params.get("rpm_filter_min_hz", 0.0),
+        "gyro_lowpass_hz":   params.get("filter.gyro_lpf",    params.get("gyro_lowpass_hz",   0.0)),
+        "gyro_lowpass2_hz":  params.get("filter.gyro_lpf2",   params.get("gyro_lowpass2_hz",  0.0)),
+        "dterm_lowpass_hz":  params.get("filter.dterm_lpf",   params.get("dterm_lowpass_hz",  0.0)),
+        "dterm_lowpass2_hz": params.get("filter.dterm_lpf2",  params.get("dterm_lowpass2_hz", 0.0)),
+        "gyro_notch1_hz":    params.get("filter.notch1.freq", params.get("gyro_notch1_hz",    0.0)),
+        "gyro_notch1_cutoff":params.get("filter.notch1.bw",   params.get("gyro_notch1_cutoff",0.0)),
+        "gyro_notch2_hz":    params.get("filter.notch2.freq", params.get("gyro_notch2_hz",    0.0)),
+        "gyro_notch2_cutoff":params.get("filter.notch2.bw",   params.get("gyro_notch2_cutoff",0.0)),
+        "rpm_filter_min_hz": params.get("filter.rpm_min",     params.get("rpm_filter_min_hz", 0.0)),
     }
 
     # ── 电池 ──────────────────────────────────────────────────
