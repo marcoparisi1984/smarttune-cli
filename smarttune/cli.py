@@ -201,58 +201,33 @@ def analyze(log_file: Path, platform_name: str, output_file: Optional[Path],
 
         # Phase 5: Filter (B1 fix: `analyze` previously never ran filter
         # analysis despite its own docstring/skill docs promising it).
-        # Reuses the already-parsed flight_data/params instead of going
-        # through services.analyze_filter(), which would re-parse the log
-        # from disk a second time.
+        # Reuses the already-parsed flight_data via the shared
+        # compute_auto_filter_response() helper instead of going through
+        # services.analyze_filter(), which would re-parse the log from disk
+        # a second time.
         filter_result = None
         if "filter" in capabilities:
             p_filter = progress.add_task("[cyan]Filter analysis...", total=None)
             try:
-                import importlib
-                import numpy as np
+                from smarttune.services.analysis import compute_auto_filter_response
 
-                _ft_mod = importlib.import_module(f"smarttune.platform.{adapter.name}.filter_transfer")
-                params = flight_data.params or {}
-                sample_rate = flight_data.sample_rate_hz or 400
-                freqs = np.linspace(1, sample_rate / 2, 500)
-
-                cfg = _ft_mod.derive_filters_from_params(params)
-                config_summary = cfg.get("config_summary", "auto")
-                mag_db, phase_deg = _ft_mod.compute_filter_response(freqs, sample_rate, params=params)
-
-                idx_3db = np.where(mag_db < -3)[0]
-                cutoff_3db_hz = float(freqs[idx_3db[0]]) if idx_3db.size > 0 else None
-
-                key_freqs_list = [1, 5, 10, 20, 40, 80, 120, 200]
-                key_points = []
-                for fk in key_freqs_list:
-                    if fk >= freqs[-1]:
-                        break
-                    idx = int(np.argmin(np.abs(freqs - fk)))
-                    key_points.append({
-                        "frequency_hz": fk,
-                        "magnitude_db": round(float(mag_db[idx]), 1),
-                        "phase_deg": round(float(phase_deg[idx]), 1),
-                    })
-
-                try:
-                    filter_chain = _ft_mod.build_filter_display_lines(params)
-                except Exception:
-                    filter_chain = None
-
+                auto = compute_auto_filter_response(adapter, flight_data)
                 filter_result = {
                     "mode": "auto",
-                    "config_summary": config_summary,
-                    "cutoff_3db_hz": round(cutoff_3db_hz, 1) if cutoff_3db_hz is not None else None,
-                    "key_frequency_response": key_points,
-                    "filter_chain": filter_chain,
-                    "sample_rate_hz": round(sample_rate, 1),
+                    "config_summary": auto["config_summary"],
+                    "cutoff_3db_hz": (
+                        round(auto["cutoff_3db_hz"], 1)
+                        if auto["cutoff_3db_hz"] is not None else None
+                    ),
+                    "key_frequency_response": auto["key_frequency_response"],
+                    "filter_chain": auto["filter_chain"],
+                    "sample_rate_hz": round(auto["sample_rate_hz"], 1),
                 }
                 if visual:
                     filter_result["bode_data"] = {
-                        "freqs": freqs.tolist(),
-                        "magnitude_db": mag_db.tolist(),
-                        "phase_deg": phase_deg.tolist(),
+                        "freqs": auto["freqs"].tolist(),
+                        "magnitude_db": auto["magnitude_db"].tolist(),
+                        "phase_deg": auto["phase_deg"].tolist(),
                     }
                 # filter_result is a plain dict (key frequency points / config
                 # summary), not a FilterAnalysisResult dataclass — kept out of

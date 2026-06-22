@@ -442,6 +442,85 @@ def analyze_sysid(
     }
 
 
+# ---------------------------------------------------------------------------
+# Filter analysis — shared computation
+#
+# analyze_filter(), analyze_log(), and the CLI's `analyze` command all need
+# the same "auto-derive from logged params" Bode response. Centralized here
+# so the three call sites can't drift apart.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_SAMPLE_RATE_HZ = 400.0
+_FILTER_RESPONSE_FREQ_POINTS = 500
+_FILTER_KEY_FREQS_HZ = [1, 5, 10, 20, 40, 80, 120, 200]
+
+
+def _load_filter_transfer_module(adapter: PlatformAdapter):
+    try:
+        return importlib.import_module(
+            f"smarttune.platform.{adapter.name}.filter_transfer"
+        )
+    except ImportError:
+        raise SmartTuneError(
+            message=f"Filter transfer module not available for {adapter.display_name}",
+            code="E5051",
+        )
+
+
+def _filter_cutoff_3db_hz(freqs: np.ndarray, mag_db: np.ndarray) -> Optional[float]:
+    idx_3db = np.where(mag_db < -3)[0]
+    return float(freqs[idx_3db[0]]) if idx_3db.size > 0 else None
+
+
+def _filter_key_frequency_points(
+    freqs: np.ndarray, mag_db: np.ndarray, phase_deg: np.ndarray,
+) -> List[Dict[str, float]]:
+    key_points = []
+    for fk in _FILTER_KEY_FREQS_HZ:
+        if fk >= freqs[-1]:
+            break
+        idx = int(np.argmin(np.abs(freqs - fk)))
+        key_points.append({
+            "frequency_hz": fk,
+            "magnitude_db": round(float(mag_db[idx]), 1),
+            "phase_deg": round(float(phase_deg[idx]), 1),
+        })
+    return key_points
+
+
+def compute_auto_filter_response(adapter: PlatformAdapter, fd: FlightData) -> Dict[str, Any]:
+    """Auto-derive the filter Bode response from logged params (no manual override).
+
+    Returns a dict with config_summary / cutoff_3db_hz / key_frequency_response /
+    filter_chain / sample_rate_hz plus the raw freqs / magnitude_db / phase_deg
+    arrays for callers that need the full curve (plotting, serialization).
+    """
+    _ft_mod = _load_filter_transfer_module(adapter)
+    params = fd.params or {}
+    sample_rate = fd.sample_rate_hz or _DEFAULT_SAMPLE_RATE_HZ
+    freqs = np.linspace(1, sample_rate / 2, _FILTER_RESPONSE_FREQ_POINTS)
+
+    cfg = _ft_mod.derive_filters_from_params(params)
+    config_summary = cfg.get("config_summary", "auto")
+    mag_db, phase_deg = _ft_mod.compute_filter_response(freqs, sample_rate, params=params)
+
+    try:
+        filter_chain = _ft_mod.build_filter_display_lines(params)
+    except Exception:
+        filter_chain = None
+
+    return {
+        "config_summary": config_summary,
+        "cutoff_3db_hz": _filter_cutoff_3db_hz(freqs, mag_db),
+        "key_frequency_response": _filter_key_frequency_points(freqs, mag_db, phase_deg),
+        "filter_chain": filter_chain,
+        "sample_rate_hz": sample_rate,
+        "freqs": freqs,
+        "magnitude_db": mag_db,
+        "phase_deg": phase_deg,
+    }
+
+
 def analyze_filter(
     log_path: Path,
     platform: str = "auto",
@@ -469,73 +548,45 @@ def analyze_filter(
             code="E5050",
         )
 
-    try:
-        _ft_mod = importlib.import_module(
-            f"smarttune.platform.{adapter.name}.filter_transfer"
-        )
-    except ImportError:
-        raise SmartTuneError(
-            message=f"Filter transfer module not available for {adapter.display_name}",
-            code="E5051",
-        )
-
-    compute_filter_response = _ft_mod.compute_filter_response
-    derive_filters_from_params = _ft_mod.derive_filters_from_params
-    get_fallback_gyro_filter_hz = _ft_mod.get_fallback_gyro_filter_hz
-    get_notch_bandwidth_hz = _ft_mod.get_notch_bandwidth_hz
-    build_filter_display_lines = _ft_mod.build_filter_display_lines
-
     params = fd.params or {}
-    sample_rate = fd.sample_rate_hz or 400
-    freqs = np.linspace(1, sample_rate / 2, 500)
+    sample_rate = fd.sample_rate_hz or _DEFAULT_SAMPLE_RATE_HZ
+    freqs = np.linspace(1, sample_rate / 2, _FILTER_RESPONSE_FREQ_POINTS)
 
     use_manual = (gyro_filter_hz is not None or notch_freq_hz is not None) or not auto_derive
 
     if use_manual:
-        current_gyro = gyro_filter_hz if gyro_filter_hz is not None else get_fallback_gyro_filter_hz(params)
+        _ft_mod = _load_filter_transfer_module(adapter)
+        current_gyro = (
+            gyro_filter_hz if gyro_filter_hz is not None
+            else _ft_mod.get_fallback_gyro_filter_hz(params)
+        )
         notch_params = None
         if notch_freq_hz is not None and notch_freq_hz > 0:
             notch_params = {
                 "center_hz": notch_freq_hz,
-                "bandwidth_hz": get_notch_bandwidth_hz(params),
+                "bandwidth_hz": _ft_mod.get_notch_bandwidth_hz(params),
                 "attenuation_db": 30,
                 "harmonics": 3,
             }
-        mag_db, phase_deg = compute_filter_response(
+        mag_db, phase_deg = _ft_mod.compute_filter_response(
             freqs, sample_rate, current_gyro, notch_params
         )
         config_summary = f"GYRO_FILTER={current_gyro:.0f}Hz"
         if notch_freq_hz:
             config_summary += f", Notch={notch_freq_hz:.0f}Hz"
+        cutoff_3db_hz = _filter_cutoff_3db_hz(freqs, mag_db)
+        key_points = _filter_key_frequency_points(freqs, mag_db, phase_deg)
+        filter_chain = None
     else:
-        cfg = derive_filters_from_params(params)
-        config_summary = cfg.get("config_summary", "auto")
-        mag_db, phase_deg = compute_filter_response(freqs, sample_rate, params=params)
-
-    # -3dB cutoff
-    idx_3db = np.where(mag_db < -3)[0]
-    cutoff_3db_hz = float(freqs[idx_3db[0]]) if idx_3db.size > 0 else None
-
-    # Key frequency points for summary
-    key_freqs_list = [1, 5, 10, 20, 40, 80, 120, 200]
-    key_points = []
-    for fk in key_freqs_list:
-        if fk >= freqs[-1]:
-            break
-        idx = int(np.argmin(np.abs(freqs - fk)))
-        key_points.append({
-            "frequency_hz": fk,
-            "magnitude_db": round(float(mag_db[idx]), 1),
-            "phase_deg": round(float(phase_deg[idx]), 1),
-        })
-
-    # Filter chain info (auto mode)
-    filter_chain = None
-    if not use_manual:
-        try:
-            filter_chain = build_filter_display_lines(params)
-        except Exception:
-            pass
+        auto = compute_auto_filter_response(adapter, fd)
+        config_summary = auto["config_summary"]
+        cutoff_3db_hz = auto["cutoff_3db_hz"]
+        key_points = auto["key_frequency_response"]
+        filter_chain = auto["filter_chain"]
+        sample_rate = auto["sample_rate_hz"]
+        freqs = auto["freqs"]
+        mag_db = auto["magnitude_db"]
+        phase_deg = auto["phase_deg"]
 
     result = {
         "platform": adapter.name,
@@ -673,27 +724,14 @@ def analyze_log(
     filter_dict = None
     if "filter" in requested and "filter" in capabilities:
         try:
-            _ft_mod = importlib.import_module(
-                f"smarttune.platform.{adapter.name}.filter_transfer"
-            )
-            params = fd.params or {}
-            sample_rate = fd.sample_rate_hz or 400
-            freqs = np.linspace(1, sample_rate / 2, 500)
-
-            cfg = _ft_mod.derive_filters_from_params(params)
-            config_summary = cfg.get("config_summary", "auto")
-            mag_db, phase_deg = _ft_mod.compute_filter_response(freqs, sample_rate, params=params)
-
-            idx_3db = np.where(mag_db < -3)[0]
-            cutoff_3db = float(freqs[idx_3db[0]]) if idx_3db.size > 0 else None
-
+            auto = compute_auto_filter_response(adapter, fd)
             filter_dict = serialize_filter_result(
-                cutoff_3db_hz=cutoff_3db,
-                config_summary=config_summary,
-                freqs=freqs,
-                mag_db=mag_db,
-                phase_deg=phase_deg,
-                sample_rate_hz=sample_rate,
+                cutoff_3db_hz=auto["cutoff_3db_hz"],
+                config_summary=auto["config_summary"],
+                freqs=auto["freqs"],
+                mag_db=auto["magnitude_db"],
+                phase_deg=auto["phase_deg"],
+                sample_rate_hz=auto["sample_rate_hz"],
             )
         except Exception as exc:
             logger.warning("Filter analysis failed: %s", exc)
