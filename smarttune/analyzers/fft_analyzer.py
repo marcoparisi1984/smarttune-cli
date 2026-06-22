@@ -248,10 +248,14 @@ class FFTAnalyzer:
         recs = self._build_notch_recommendation(peaks, vib_level)
 
         # 平台分支：PX4 静态陷波无 mode/REF/HMC/ATT 概念，
-        # 输出只保留 PX4 可表达的参数并转换语义。
+        # 输出只保留 PX4 可表达的参数并转换语义。Betaflight 同样没有
+        # mode/REF/HMC 概念（只有固定陷波 + 独立的动态陷波系统），
+        # 下面的 mode=2 油门跟踪警告是纯 ArduPilot 语义，之前误用
+        # "非 PX4 即 ArduPilot" 的二分判断，导致这条提示也泄漏到了
+        # Betaflight 报告里。
         if self._platform == "px4":
             recs = self._adapt_recommendation_px4(recs, peaks, warnings)
-        else:
+        elif self._platform == "ardupilot":
             # C3 修复配套（仅 ArduPilot 语义）：mode 2 的 REF 必须由用户
             # 设为悬停油门值，本工具无法推断
             if recs.get("filter.notch1.mode") == 2 and recs.get("filter.notch1.enable") == 1:

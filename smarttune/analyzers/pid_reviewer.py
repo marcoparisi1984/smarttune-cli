@@ -152,6 +152,26 @@ def detect_steps(
     return step_indices
 
 
+# 阶跃响应窗口的物理时长（毫秒），与采样率无关。
+# 旧实现把 window_before/window_after 写成固定样本数 (5, 200)，隐含假设
+# dt_ms≈4ms（ArduPilot ~250Hz 日志，200*4=800ms 窗口）。Betaflight 常见
+# 8000Hz 采样下 dt_ms=0.125ms，同样的 200 样本只覆盖 25ms —— 阶跃响应
+# 还没爬升完窗口就已经截断，导致 rise_time≈0、虚假的"快速 settling"，
+# 以及把窗口内的噪声抖动误计成振荡次数。改为按 dt_ms 换算样本数，
+# 保证窗口时长恒定（不随采样率变化）。
+_WINDOW_BEFORE_MS = 20.0
+_WINDOW_AFTER_MS = 800.0
+
+
+def _window_samples(dt_ms: float) -> Tuple[int, int]:
+    """把固定的窗口时长（ms）换算成当前采样率下的样本数。"""
+    if dt_ms <= 0:
+        return 5, 200
+    before = max(1, round(_WINDOW_BEFORE_MS / dt_ms))
+    after = max(5, round(_WINDOW_AFTER_MS / dt_ms))
+    return before, after
+
+
 def _check_window_quality(
     actual: np.ndarray, desired: np.ndarray, step_idx: int,
     window_before: int = 5, window_after: int = 200,
@@ -540,13 +560,18 @@ class PIDReviewer:
         }
 
         # 6. 时域阶跃窗口提取（供每个阶跃单独绘图）
+        win_before, win_after = _window_samples(dt_ms)
         step_responses = []
         for idx in step_indices:
-            is_good, reason = _check_window_quality(sig.actual, sig.desired, idx)
+            is_good, reason = _check_window_quality(
+                sig.actual, sig.desired, idx,
+                window_before=win_before, window_after=win_after,
+            )
             if not is_good:
                 continue
             t_rel, act_win, magnitude = _extract_step_response(
-                sig.desired, sig.actual, idx, dt_ms=dt_ms
+                sig.desired, sig.actual, idx, dt_ms=dt_ms,
+                window_before=win_before, window_after=win_after,
             )
             t_global = time_ms[idx] + t_rel
             step_responses.append({
@@ -581,15 +606,20 @@ class PIDReviewer:
         counts = {f: 0 for f in metric_fields}
         skipped_quality = 0
         high_overshoot_count = 0
+        win_before, win_after = _window_samples(dt_ms)
 
         for idx in step_indices:
-            is_good, reason = _check_window_quality(sig.actual, sig.desired, idx)
+            is_good, reason = _check_window_quality(
+                sig.actual, sig.desired, idx,
+                window_before=win_before, window_after=win_after,
+            )
             if not is_good:
                 skipped_quality += 1
                 _log.debug("Skipping step window idx=%d, quality: %s", idx, reason)
                 continue
             t_rel, act_win, magnitude = _extract_step_response(
-                sig.desired, sig.actual, idx, dt_ms=dt_ms
+                sig.desired, sig.actual, idx, dt_ms=dt_ms,
+                window_before=win_before, window_after=win_after,
             )
             m = _compute_metrics(act_win, t_rel, magnitude, dt_ms=dt_ms,
                                  settle_band=self._settle_band)
@@ -773,14 +803,19 @@ class PIDReviewer:
         dt_ms = self._estimate_dt_ms(sig)
         step_indices = detect_steps(sig.desired, dt_ms=dt_ms)
         time_ms = sig.timestamp_s * 1000.0
+        win_before, win_after = _window_samples(dt_ms)
 
         steps_out = []
         for idx in step_indices:
-            is_good, _ = _check_window_quality(sig.actual, sig.desired, idx)
+            is_good, _ = _check_window_quality(
+                sig.actual, sig.desired, idx,
+                window_before=win_before, window_after=win_after,
+            )
             if not is_good:
                 continue
             t_rel, act_win, magnitude = _extract_step_response(
-                sig.desired, sig.actual, idx, dt_ms=dt_ms
+                sig.desired, sig.actual, idx, dt_ms=dt_ms,
+                window_before=win_before, window_after=win_after,
             )
             t_global = time_ms[idx] + t_rel
             steps_out.append({
