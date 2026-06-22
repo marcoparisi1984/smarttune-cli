@@ -199,8 +199,71 @@ def analyze(log_file: Path, platform_name: str, output_file: Optional[Path],
                 module_failures.append(("Magnetometer", exc))
                 progress.update(p_mag, completed=True, description=f"[yellow]! Magnetometer skipped: {exc}")
 
+        # Phase 5: Filter (B1 fix: `analyze` previously never ran filter
+        # analysis despite its own docstring/skill docs promising it).
+        # Reuses the already-parsed flight_data/params instead of going
+        # through services.analyze_filter(), which would re-parse the log
+        # from disk a second time.
+        filter_result = None
+        if "filter" in capabilities:
+            p_filter = progress.add_task("[cyan]Filter analysis...", total=None)
+            try:
+                import importlib
+                import numpy as np
+
+                _ft_mod = importlib.import_module(f"smarttune.platform.{adapter.name}.filter_transfer")
+                params = flight_data.params or {}
+                sample_rate = flight_data.sample_rate_hz or 400
+                freqs = np.linspace(1, sample_rate / 2, 500)
+
+                cfg = _ft_mod.derive_filters_from_params(params)
+                config_summary = cfg.get("config_summary", "auto")
+                mag_db, phase_deg = _ft_mod.compute_filter_response(freqs, sample_rate, params=params)
+
+                idx_3db = np.where(mag_db < -3)[0]
+                cutoff_3db_hz = float(freqs[idx_3db[0]]) if idx_3db.size > 0 else None
+
+                key_freqs_list = [1, 5, 10, 20, 40, 80, 120, 200]
+                key_points = []
+                for fk in key_freqs_list:
+                    if fk >= freqs[-1]:
+                        break
+                    idx = int(np.argmin(np.abs(freqs - fk)))
+                    key_points.append({
+                        "frequency_hz": fk,
+                        "magnitude_db": round(float(mag_db[idx]), 1),
+                        "phase_deg": round(float(phase_deg[idx]), 1),
+                    })
+
+                try:
+                    filter_chain = _ft_mod.build_filter_display_lines(params)
+                except Exception:
+                    filter_chain = None
+
+                filter_result = {
+                    "mode": "auto",
+                    "config_summary": config_summary,
+                    "cutoff_3db_hz": round(cutoff_3db_hz, 1) if cutoff_3db_hz is not None else None,
+                    "key_frequency_response": key_points,
+                    "filter_chain": filter_chain,
+                    "sample_rate_hz": round(sample_rate, 1),
+                }
+                if visual:
+                    filter_result["bode_data"] = {
+                        "freqs": freqs.tolist(),
+                        "magnitude_db": mag_db.tolist(),
+                        "phase_deg": phase_deg.tolist(),
+                    }
+                # filter_result is a plain dict (key frequency points / config
+                # summary), not a FilterAnalysisResult dataclass — kept out of
+                # full_result.filter on purpose, see all_recommendations' docstring.
+                progress.update(p_filter, completed=True, description="[green]✓ Filter analysis complete")
+            except Exception as exc:
+                module_failures.append(("Filter", exc))
+                progress.update(p_filter, completed=True, description=f"[yellow]! Filter skipped: {exc}")
+
         # Check: at least one module must succeed
-        if pid_result is None and fft_result is None and magfit_result is None:
+        if pid_result is None and fft_result is None and magfit_result is None and filter_result is None:
             progress.stop()
             for mod_name, exc in module_failures:
                 _console.print(f"\n[bold red]✗ {mod_name} failed:[/bold red]")
@@ -248,12 +311,14 @@ def analyze(log_file: Path, platform_name: str, output_file: Optional[Path],
                 fmt.format_pid(pid_result)
             if fft_result is not None:
                 fmt.format_fft(fft_result)
+            if filter_result is not None:
+                fmt.format_filter(filter_result, visual=visual)
             if magfit_result is not None:
                 fmt.format_magfit(magfit_result)
 
             # ── Markdown report ──
             if effective_report_format == "md" and output_file:
-                md = fmt.to_markdown(full_result)
+                md = fmt.to_markdown(full_result, fft_result=fft_result, filter_result=filter_result)
                 output_file.write_text(md, encoding="utf-8")
                 _console.print(f"\n[green]✓[/green] Report saved: [cyan]{output_file}[/cyan]")
 
@@ -282,6 +347,8 @@ def analyze(log_file: Path, platform_name: str, output_file: Optional[Path],
             succeeded.append("PID")
         if fft_result is not None:
             succeeded.append("FFT")
+        if filter_result is not None:
+            succeeded.append("Filter")
         if magfit_result is not None:
             succeeded.append("Magnetometer")
         failed = [name for name, _ in module_failures]

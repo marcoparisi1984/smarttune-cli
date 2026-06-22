@@ -151,7 +151,13 @@ class OutputFormatter:
         recs = result.get("recommendations", {})
         if isinstance(recs, dict):
             for key, val in recs.items():
-                native = self._platform_param(f"filter.{key}") if "." not in key else self._platform_param(key)
+                generic_name = key if "." in key else f"filter.{key}"
+                if not self._adapter.supports_param(generic_name):
+                    # No real equivalent on this platform (e.g. ArduPilot-only
+                    # INS_HNTCH_REF/HMC concepts) — showing the untranslated
+                    # generic name would look like a valid parameter, so skip it.
+                    continue
+                native = self._platform_param(generic_name)
                 self._console.print(f"    → [cyan]{native}[/cyan]: {val}")
 
         for w in result.get("warnings", []):
@@ -161,6 +167,47 @@ class OutputFormatter:
             path = self._generate_fft_plot(result)
             if path:
                 self._console.print(f"\n[green]✓[/green] FFT plot saved: [cyan]{path}[/cyan]")
+
+    # ------------------------------------------------------------------
+    # Filter 输出
+    # ------------------------------------------------------------------
+
+    def format_filter(self, result: Dict[str, Any], visual: bool = False) -> None:
+        """渲染滤波器传递函数分析结果（同 ``stune filter`` 的终端输出）。"""
+        self._console.print(Panel("Filter Transfer Function Analysis", style="bold cyan"))
+        mode_label = "[yellow]Manual[/yellow]" if result.get("mode") == "manual" else "[green]Auto-derived[/green]"
+        self._console.print(f"\n[bold]Mode:[/bold] {mode_label}")
+        self._console.print(f"[bold]Config:[/bold] {result.get('config_summary', '')}")
+
+        key_pts = result.get("key_frequency_response", [])
+        if key_pts:
+            table = Table(title="Key Frequency Response")
+            table.add_column("Freq (Hz)", style="cyan")
+            table.add_column("Magnitude (dB)", justify="right")
+            table.add_column("Phase (°)", justify="right")
+            for pt in key_pts:
+                table.add_row(
+                    str(pt["frequency_hz"]),
+                    f"{pt['magnitude_db']:.1f}",
+                    f"{pt['phase_deg']:.1f}",
+                )
+            self._console.print(table)
+
+        if result.get("cutoff_3db_hz"):
+            self._console.print(f"\n[yellow]-3dB cutoff ≈ {result['cutoff_3db_hz']:.1f} Hz[/yellow]")
+
+        filter_chain = result.get("filter_chain")
+        if filter_chain and result.get("mode") == "auto":
+            self._console.print("\n[bold]Filter chain:[/bold]")
+            for line in filter_chain:
+                self._console.print(line)
+
+        if visual:
+            bode = result.get("bode_data")
+            if bode:
+                path = self._generate_filter_plot(result)
+                if path:
+                    self._console.print(f"\n[green]✓[/green] Bode Plot saved: [cyan]{path}[/cyan]")
 
     # ------------------------------------------------------------------
     # SysID 输出
@@ -356,6 +403,8 @@ class OutputFormatter:
             return
 
         for rec in recs:
+            if not self._adapter.supports_param(rec.param.generic_name):
+                continue
             native = self._platform_param(rec.param.generic_name)
             arrow = "↑" if rec.action == "increase" else "↓"
             change = rec.change_percent
@@ -400,8 +449,19 @@ class OutputFormatter:
     # Markdown 输出
     # ------------------------------------------------------------------
 
-    def to_markdown(self, result: FullAnalysisResult) -> str:
-        """生成 Markdown 格式报告。"""
+    def to_markdown(
+        self,
+        result: FullAnalysisResult,
+        fft_result: Optional[Dict[str, Any]] = None,
+        filter_result: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """生成 Markdown 格式报告。
+
+        ``fft_result``/``filter_result`` 是分析器返回的原始 dict（而不是
+        ``result.fft``/``result.filter`` 数据类字段，那两个字段在 FFT 分析器
+        返回 dict 时会保持 None，详见 ``FullAnalysisResult.all_recommendations``
+        的说明）。传入时会额外渲染对应的 Markdown 小节。
+        """
         lines = [
             f"# SmartTune Analysis Report",
             f"",
@@ -423,9 +483,36 @@ class OutputFormatter:
                     lines.append(f"- Oscillations: {m.oscillation_count}")
                     lines.append(f"- SS error: {m.steady_state_error_percent:.1f}%")
                 for rec in ax.recommendations:
+                    if not self._adapter.supports_param(rec.param.generic_name):
+                        continue
                     native = self._platform_param(rec.param.generic_name)
                     lines.append(f"- **{native}**: {rec.current:.4f} → {rec.suggested:.4f} ({rec.reason})")
                 lines.append("")
+
+        if fft_result:
+            lines.append("## FFT Vibration Analysis")
+            lines.append("")
+            lines.append(f"- Vibration: {fft_result.get('vibration_level', 'UNKNOWN')} "
+                          f"({fft_result.get('vibration_value_mss', 0):.1f} m/s²)")
+            recs = fft_result.get("recommendations", {})
+            if isinstance(recs, dict):
+                for key, val in recs.items():
+                    generic_name = key if "." in key else f"filter.{key}"
+                    if not self._adapter.supports_param(generic_name):
+                        continue
+                    native = self._platform_param(generic_name)
+                    lines.append(f"- **{native}**: {val}")
+            lines.append("")
+
+        if filter_result:
+            lines.append("## Filter Transfer Function")
+            lines.append("")
+            lines.append(f"- Config: {filter_result.get('config_summary', '')}")
+            if filter_result.get("cutoff_3db_hz"):
+                lines.append(f"- -3dB cutoff ≈ {filter_result['cutoff_3db_hz']:.1f} Hz")
+            for line in filter_result.get("filter_chain") or []:
+                lines.append(f"- {line}")
+            lines.append("")
 
         all_recs = result.all_recommendations
         if all_recs:
@@ -434,6 +521,8 @@ class OutputFormatter:
             lines.append("| Parameter | Current | Suggested | Reason |")
             lines.append("|---|---|---|---|")
             for rec in all_recs:
+                if not self._adapter.supports_param(rec.param.generic_name):
+                    continue
                 native = self._platform_param(rec.param.generic_name)
                 lines.append(f"| {native} | {rec.current:.4f} | {rec.suggested:.4f} | {rec.reason} |")
 
@@ -671,6 +760,33 @@ class OutputFormatter:
         plt.savefig(out_path, dpi=150)
         plt.close(fig)
         return out_path
+
+    def _generate_filter_plot(self, result: Dict[str, Any]) -> Optional[str]:
+        """绘制滤波器 Bode 图（复用 ``stune filter --visual`` 的逻辑）。"""
+        bode = result.get("bode_data")
+        if not bode:
+            return None
+        try:
+            import numpy as np
+            from smarttune.output.filter_visualization import plot_bode
+        except ImportError:
+            return None
+
+        out_path = Path.cwd() / "output"
+        out_path.mkdir(parents=True, exist_ok=True)
+        img_path = out_path / "filter_bode.png"
+        try:
+            plot_bode(
+                np.array(bode["freqs"]),
+                np.array(bode["magnitude_db"]),
+                np.array(bode["phase_deg"]),
+                str(img_path),
+                title=f"Filter Bode Plot ({result.get('config_summary', '')})",
+            )
+        except Exception:
+            logger.exception("Filter Bode plot generation failed")
+            return None
+        return str(img_path)
 
     def _generate_hardware_report_plot(self, hw_report: Dict[str, Any]) -> Optional[str]:
         """
